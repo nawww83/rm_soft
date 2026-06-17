@@ -136,28 +136,58 @@ inline std::vector<int> rm_soft_decode_fast(int r, int m, std::span<const T> llr
     return decoded_bits;
 }
 
-/**
- * @brief Кодирование информационной последовательности кодом Рида-Маллера RM(r, m).
- * 
- * Функция вычисляет длину результирующего блока \f$N = 2^m\f$ и вызывает 
- * внутреннюю процедуру кодирования на базе рекурсивной конструкции Плоткина.
- * 
- * @param[in] r Порядок кода.
- * @param[in] m Параметр длины кодового слова.
- * @param[in] info Вектор информационных битов длины \f$K = \sum_{i=0}^{r} \binom{m}{i}\f$.
- * @return std::vector<int> Сгенерированное разрешенное кодовое слово длины \f$N\f$.
- */
+inline void plotkin_encode_recursive(int r, int m, std::span<const int> info, std::span<int> output) {
+    const size_t n = output.size();
+    
+    // Базовые случаи
+    if (r == 0) { 
+        assert(!info.empty());
+        std::fill(output.begin(), output.end(), info[0]); 
+        return; 
+    }
+    if (r == m) { 
+        assert(info.size() == n);
+        std::copy(info.begin(), info.end(), output.begin()); 
+        return; 
+    }
+
+    // Вычисляем размерности подкодов
+    int k_v1 = get_rm_k(r, m - 1);
+    int k_v2 = get_rm_k(r - 1, m - 1);
+    assert(info.size() == static_cast<size_t>(k_v1 + k_v2));
+
+    // Нарезаем входную информацию
+    auto info_v1 = info.subspan(0, k_v1);
+    auto info_v2 = info.subspan(k_v1, k_v2);
+
+    const size_t half = n / 2;
+    auto output_left  = output.subspan(0, half);
+    auto output_right = output.subspan(half, half);
+
+    // Схема Плоткина: (v1, v1 ^ v2)
+    
+    // 1. Кодируем v1 прямо в левую половину output. Теперь output_left содержит v1.
+    plotkin_encode_recursive(r, m - 1, info_v1, output_left);
+
+    // 2. Кодируем v2 прямо в правую половину output. Теперь output_right содержит v2.
+    // Это легально, так как поддеревья изолированы друг от друга.
+    plotkin_encode_recursive(r - 1, m - 1, info_v2, output_right);
+
+    // 3. Выполняем финальный XOR на месте: правая половина должна стать (v1 ^ v2).
+    // Поскольку output_left хранит v1, а output_right хранит v2, мы просто объединяем их.
+    for (size_t i = 0; i < half; ++i) {
+        output_right[i] = output_left[i] ^ output_right[i];
+    }
+}
+
 inline std::vector<int> rm_encode(int r, int m, const std::vector<int>& info) {
     assert(info.size() == static_cast<size_t>(get_rm_k(r, m)) && "Input info size mismatch!");
     
     size_t n = 1 << m;
     std::vector<int> codeword(n);
     
-    // Создаем воркспейс на стеке, памяти N * 2 более чем достаточно для энкодера
-    DecoderWorkspace<int> ws(n * 2); 
-    
-    // Передаем объект ws пятым аргументом
-    plotkin_encode_recursive(r, m, info, codeword, ws);
+    // Вызов без передачи ws
+    plotkin_encode_recursive(r, m, info, codeword);
     
     return codeword;
 }
