@@ -7,6 +7,7 @@
 #include <numeric>
 #include <concepts>
 #include <complex>
+#include <cassert>
 
 #include "generals.hpp"
 
@@ -50,7 +51,6 @@ inline void rm_soft_decode_recursive_fast(int r, int m, std::span<const T> llr, 
     const size_t n = llr.size();
 
     // Базовый случай 1: Код RM(0, m) — код с полным повторением.
-    // Решение принимается по знаку суммы всех элементов LLR.
     if (r == 0) { 
         T sum = std::accumulate(llr.begin(), llr.end(), T(0));
         std::fill(output.begin(), output.end(), (sum >= T(0)) ? T(1) : T(-1));
@@ -58,7 +58,6 @@ inline void rm_soft_decode_recursive_fast(int r, int m, std::span<const T> llr, 
     }
     
     // Базовый случай 2: Код RM(m-1, m) — код с одиночной проверкой на четность (SPC).
-    // Используется мягкое декодирование по алгоритму Вагнера.
     if (r == m - 1) { 
         // Жесткое покомпонентное решение
         std::transform(llr.begin(), llr.end(), output.begin(), [](T x) { return (x >= T(0)) ? T(1) : T(-1); });
@@ -76,13 +75,19 @@ inline void rm_soft_decode_recursive_fast(int r, int m, std::span<const T> llr, 
     auto llr1 = llr.subspan(0, half);
     auto llr2 = llr.subspan(half, half);
 
+    // Безопасное RAII управление памятью: offset гарантированно откатится при любом return
+    typename DecoderWorkspace<T>::Guard memory_guard(ws); 
+
     // Шаг 1: Декодирование компоненты v2 (соответствует коду RM(r-1, m-1))
     auto llr_v2 = ws.allocate(half);
     auto v2_dec = ws.allocate(half);
 
-    // Вычисление LLR для v2 по правилу f-функции (знак-минимум, аналогично полярным кодам)
+    // Хелпер для знака (исправление ошибки компиляции sign())
+    auto get_sign = [](T val) { return (val >= T(0)) ? T(1) : T(-1); };
+
+    // Вычисление LLR для v2 по правилу f-функции (знак-минимум)
     for (size_t i = 0; i < half; ++i) {
-        llr_v2[i] = sign(llr1[i]) * sign(llr2[i]) * std::min(std::abs(llr1[i]), std::abs(llr2[i]));
+        llr_v2[i] = get_sign(llr1[i]) * get_sign(llr2[i]) * std::min(std::abs(llr1[i]), std::abs(llr2[i]));
     }
     rm_soft_decode_recursive_fast<T>(r - 1, m - 1, llr_v2, v2_dec, ws);
 
@@ -99,11 +104,10 @@ inline void rm_soft_decode_recursive_fast(int r, int m, std::span<const T> llr, 
     // Шаг 3: Объединение результатов по схеме Плоткина в биполярном домене
     for (size_t i = 0; i < half; ++i) {
         output[i] = v1_dec[i];
-        output[i + half] = v1_dec[i] * v2_dec[i]; // Эквивалентно XOR в булевом домене
+        output[i + half] = v1_dec[i] * v2_dec[i]; 
     }
 
-    // Освобождение временной памяти в структуре Workspace
-    ws.free(half * 4);
+    // Ручной ws.free() больше не нужен, memory_guard сделает всё сам
 }
 
 /**
@@ -144,9 +148,17 @@ inline std::vector<int> rm_soft_decode_fast(int r, int m, std::span<const T> llr
  * @return std::vector<int> Сгенерированное разрешенное кодовое слово длины \f$N\f$.
  */
 inline std::vector<int> rm_encode(int r, int m, const std::vector<int>& info) {
+    assert(info.size() == static_cast<size_t>(get_rm_k(r, m)) && "Input info size mismatch!");
+    
     size_t n = 1 << m;
     std::vector<int> codeword(n);
-    plotkin_encode_recursive(r, m, info, codeword);
+    
+    // Создаем воркспейс на стеке, памяти N * 2 более чем достаточно для энкодера
+    DecoderWorkspace<int> ws(n * 2); 
+    
+    // Передаем объект ws пятым аргументом
+    plotkin_encode_recursive(r, m, info, codeword, ws);
+    
     return codeword;
 }
 

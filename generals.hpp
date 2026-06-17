@@ -46,12 +46,6 @@ struct DecoderWorkspace {
         return sp;
     }
 
-    void free(size_t size) {
-        // Защита от ухода offset в отрицательную зону
-        assert(current_offset >= size && "Workspace underflow! Freeing too much memory.");
-        current_offset -= size;
-    }
-
     // Класс для автоматического отката offset (RAII Стек)
     struct Guard {
         DecoderWorkspace& ws;
@@ -67,23 +61,36 @@ struct DecoderWorkspace {
     };
 };
 
-
-inline void plotkin_encode_recursive(int r, int m, std::span<const int> info, std::span<int> output) {
+inline void plotkin_encode_recursive(int r, int m, std::span<const int> info, std::span<int> output, DecoderWorkspace<int>& ws) {
     const size_t n = output.size();
-    if (r == 0) { std::fill(output.begin(), output.end(), info[0]); return; }
-    if (r == m) { std::copy(info.begin(), info.end(), output.begin()); return; }
+    
+    if (r == 0) { 
+        assert(!info.empty() && "Info span cannot be empty in base case r=0");
+        std::fill(output.begin(), output.end(), info[0]); 
+        return; 
+    }
+    if (r == m) { 
+        assert(info.size() == n && "Info size must match output size in base case r=m");
+        std::copy(info.begin(), info.end(), output.begin()); 
+        return; 
+    }
 
-    int k_v2 = get_rm_k(r - 1, m - 1);
     int k_v1 = get_rm_k(r, m - 1);
+    int k_v2 = get_rm_k(r - 1, m - 1);
+
+    assert(info.size() == static_cast<size_t>(k_v1 + k_v2) && "Total info size mismatch with k_v1 + k_v2");
 
     auto info_v1 = info.subspan(0, k_v1);
     auto info_v2 = info.subspan(k_v1, k_v2);
 
     const size_t half = n / 2;
-    std::vector<int> v1(half), v2(half);
 
-    plotkin_encode_recursive(r, m - 1, info_v1, v1);
-    plotkin_encode_recursive(r - 1, m - 1, info_v2, v2);
+    typename DecoderWorkspace<int>::Guard guard(ws);
+    std::span<int> v1 = ws.allocate(half);
+    std::span<int> v2 = ws.allocate(half);
+
+    plotkin_encode_recursive(r, m - 1, info_v1, v1, ws);
+    plotkin_encode_recursive(r - 1, m - 1, info_v2, v2, ws);
 
     for (size_t i = 0; i < half; ++i) {
         output[i] = v1[i];

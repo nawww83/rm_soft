@@ -30,7 +30,7 @@
  * @param ws Ссылка на контекст арены памяти (Workspace).
  */
 template <std::floating_point T>
-inline void pure_polar_decode_recursive(size_t leaf_offset, std::span<const T> llr,
+inline void fast_ssc_recursive(size_t leaf_offset, std::span<const T> llr,
                                         std::span<T> output_codeword,
                                         const std::vector<uint8_t> &bit_mask, DecoderWorkspace<T> &ws)
 {
@@ -89,7 +89,7 @@ inline void pure_polar_decode_recursive(size_t leaf_offset, std::span<const T> l
         T s2 = (llr2[i] >= T(0)) ? T(1) : T(-1);
         llr_v1[i] = s1 * s2 * std::min(std::abs(llr1[i]), std::abs(llr2[i]));
     }
-    pure_polar_decode_recursive<T>(leaf_offset, llr_v1, v1_dec, bit_mask, ws);
+    fast_ssc_recursive<T>(leaf_offset, llr_v1, v1_dec, bit_mask, ws);
 
     auto llr_v2 = ws.allocate(half);
     auto v2_dec = ws.allocate(half);
@@ -99,7 +99,7 @@ inline void pure_polar_decode_recursive(size_t leaf_offset, std::span<const T> l
     {
         llr_v2[i] = llr2[i] + llr1[i] * v1_dec[i];
     }
-    pure_polar_decode_recursive<T>(leaf_offset + half, llr_v2, v2_dec, bit_mask, ws);
+    fast_ssc_recursive<T>(leaf_offset + half, llr_v2, v2_dec, bit_mask, ws);
 
     // Объединение решений (схлопывание узла Плоткина: x1 = v1 * v2, x2 = v2)
     for (size_t i = 0; i < half; ++i)
@@ -128,7 +128,7 @@ inline std::vector<int> polar_decode_fast_generic(std::span<const T> llr, const 
     ws.current_offset = 0;
 
     // 1. Запускаем Fast-SSC рекурсию. bipolar_output теперь содержит очищенный вектор x.
-    pure_polar_decode_recursive<T>(0, llr, bipolar_output, bit_mask, ws);
+    fast_ssc_recursive<T>(0, llr, bipolar_output, bit_mask, ws);
 
     // 2. Итеративный биполярный разворот (In-place декранчирование (разворот) матрицы Арикана)
     // Идем от мелких блоков к крупным, выполняя бабочки Плоткина наоборот.
@@ -157,6 +157,91 @@ inline std::vector<int> polar_decode_fast_generic(std::span<const T> llr, const 
     }
 
     return u;
+}
+
+/**
+ * @brief Честная рекурсивная функция SC-декодера.
+ * Записывает декодированные информационные и замороженные биты прямо в вектор u.
+ */
+template <std::floating_point T>
+inline void sc_recursive(size_t leaf_offset, std::span<const T> llr,
+                                      std::span<T> output_codeword, // Нужен для g-операции соседа
+                                      std::vector<int> &u_bits,       // Сюда пишем финальный ответ
+                                      const std::vector<uint8_t> &bit_mask, DecoderWorkspace<T> &ws)
+{
+    const size_t n = llr.size();
+
+    // Базовый случай: мы в листе дерева. Декодируем конкретный бит u[leaf_offset]
+    if (n == 1)
+    {
+        if (bit_mask[leaf_offset] == 0) // Замороженный бит
+        {
+            u_bits[leaf_offset] = 0;    // Логический 0
+            output_codeword[0] = T(1);  // Биполярный +1.0 для g-операции
+        }
+        else // Информационный бит
+        {
+            // Жесткое решение по знаку LLR: >= 0 это 0, < 0 это 1
+            u_bits[leaf_offset] = (llr[0] >= T(0)) ? 0 : 1;
+            output_codeword[0] = (llr[0] >= T(0)) ? T(1) : T(-1);
+        }
+        return;
+    }
+
+    const size_t half = n / 2;
+    typename DecoderWorkspace<T>::Guard memory_guard(ws);
+
+    auto llr_v1 = ws.allocate(half);
+    auto v1_dec = ws.allocate(half);
+    auto llr1 = llr.subspan(0, half);
+    auto llr2 = llr.subspan(half, half);
+
+    // Левая ветвь: f-операция
+    for (size_t i = 0; i < half; ++i)
+    {
+        T s1 = (llr1[i] >= T(0)) ? T(1) : T(-1);
+        T s2 = (llr2[i] >= T(0)) ? T(1) : T(-1);
+        llr_v1[i] = s1 * s2 * std::min(std::abs(llr1[i]), std::abs(llr2[i]));
+    }
+    // Спускаемся влево
+    sc_recursive<T>(leaf_offset, llr_v1, v1_dec, u_bits, bit_mask, ws);
+
+    auto llr_v2 = ws.allocate(half);
+    auto v2_dec = ws.allocate(half);
+
+    // Правая ветвь: g-операция (использует v1_dec, полученный из левой ветви)
+    for (size_t i = 0; i < half; ++i)
+    {
+        llr_v2[i] = llr2[i] + llr1[i] * v1_dec[i];
+    }
+    // Спускаемся вправо
+    sc_recursive<T>(leaf_offset + half, llr_v2, v2_dec, u_bits, bit_mask, ws);
+
+    // Схлопывание узла для передачи наверх родителю (x1 = v1 * v2, x2 = v2)
+    for (size_t i = 0; i < half; ++i)
+    {
+        output_codeword[i] = v1_dec[i] * v2_dec[i];
+        output_codeword[i + half] = v2_dec[i];
+    }
+}
+
+/**
+ * @brief Чистый верхнеуровневый интерфейс ванильного SC без постобработки
+ */
+template <std::floating_point T>
+inline std::vector<int> polar_decode_sc_clean(std::span<const T> llr, const std::vector<uint8_t> &bit_mask, DecoderWorkspace<T> &ws)
+{
+    const size_t n = llr.size();
+    std::vector<int> u(n); // Вектор u сразу под биты 0 и 1
+    std::vector<T> dummy_codeword(n); // Временный буфер для корня дерева
+
+    typename DecoderWorkspace<T>::Guard top_guard(ws);
+    ws.current_offset = 0;
+
+    // Запускаем — вся магия происходит внутри листьев рекурсии
+    sc_recursive<T>(0, llr, dummy_codeword, u, bit_mask, ws);
+
+    return u; // Возвращаем чистый, готовый вектор u!
 }
 
 /**

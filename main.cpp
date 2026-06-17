@@ -115,7 +115,8 @@ struct TotalStats
 enum class CodeType
 {
     ReedMuller,
-    Polar
+    PolarFastSsc,
+    PolarSc
 };
 
 class UniversalRandomInterleaver
@@ -225,7 +226,6 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
     const long long max_block_errors = (eb_n0_db >= 8.0) ? 2 : 20;
     const long long max_packets = (eb_n0_db >= 10.0) ? 300'000 : 50'000;
 
-    // Выносим аллокацию векторов за цикл для оптимизации скорости
     std::vector<int> tx_info(k);
     std::vector<int> tx_codeword;
     std::vector<int> qam_tx_bits;
@@ -242,22 +242,14 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
         if (code_type == CodeType::ReedMuller)
         {
             std::vector<int> tx_codeword = rm_encode(r, m, tx_info);
-
-            // ПРАВИЛЬНО И БЕЗОПАСНО: гарантируем, что размер qam_tx_bits равен padded_n
             qam_tx_bits.assign(padded_n, 0);
-            // Копируем кодовое слово в начало, а всё что после n автоматически останется нулями
             std::copy(tx_codeword.begin(), tx_codeword.end(), qam_tx_bits.begin());
         }
-        else
+        else if (code_type == CodeType::PolarFastSsc || code_type == CodeType::PolarSc)
         {
-            // Чистый полярный кодер
             std::vector<int> tx_codeword = pure_polar_encode(n, tx_info, bit_mask);
-
             interleaver.interleave(std::span<const int>(tx_codeword), std::span<int>(interleaved_bits_buf));
-
-            // ПРАВИЛЬНО И БЕЗОПАСНО: сбрасываем и заполняем нулями весь вектор маппера
             qam_tx_bits.assign(padded_n, 0);
-            // Записываем перемещенные биты в начало слова
             std::copy(interleaved_bits_buf.begin(), interleaved_bits_buf.end(), qam_tx_bits.begin());
         }
 
@@ -289,7 +281,7 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
             std::vector<int> rx_codeword = rm_soft_decode_fast(r, m, std::span<const double>(padded_rx_llr).subspan(0, n), ws);
             rx_info = rm_extract_info(r, m, rx_codeword);
         }
-        else
+        else if (code_type == CodeType::PolarFastSsc)
         {
             std::span<const double> src_llr_span(padded_rx_llr.data(), n);
             std::span<double> dst_llr_span(deinterleaved_llr_buf.data(), n);
@@ -297,6 +289,14 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
 
             std::span<const double> ready_llr_span(deinterleaved_llr_buf.data(), n);
             std::vector<int> decoded_u = polar_decode_fast_generic<double>(ready_llr_span, bit_mask, ws);
+            rx_info = polar_extract_info_generic(decoded_u, k, bit_mask);
+        } else if (code_type == CodeType::PolarSc) {
+             std::span<const double> src_llr_span(padded_rx_llr.data(), n);
+            std::span<double> dst_llr_span(deinterleaved_llr_buf.data(), n);
+            interleaver.deinterleave<double>(src_llr_span, dst_llr_span);
+
+            std::span<const double> ready_llr_span(deinterleaved_llr_buf.data(), n);
+            std::vector<int> decoded_u = polar_decode_sc_clean<double>(ready_llr_span, bit_mask, ws);
             rx_info = polar_extract_info_generic(decoded_u, k, bit_mask);
         }
 
@@ -324,7 +324,7 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
 
 int main()
 {
-    const CodeType code_type = CodeType::Polar;
+    const CodeType code_type = CodeType::ReedMuller;
     const int r = 2;
     const int m = 6;
 
@@ -397,7 +397,7 @@ int main()
 
     std::stringstream ss;
     ss << "live_results_"
-       << (code_type == CodeType::ReedMuller ? "rm" : "polar")
+       << (code_type == CodeType::ReedMuller ? "rm" : (code_type == CodeType::PolarFastSsc ? "polar_fast_ssc" : "polar_sc"))
        << "_" << r << "_" << m << ".csv";
 
     const std::string csv_filename = ss.str();
@@ -488,7 +488,7 @@ int main()
             std::cout << "    " << std::fixed << std::setprecision(1) << std::setw(4) << stats.eb_n0_db
                       << "    |  " << std::scientific << std::setprecision(4) << calculated_ber
                       << " |  " << std::scientific << std::setprecision(4) << calculated_bler
-                      << " |  " << std::scientific << std::setprecision(1) << static_cast<double>(stats.total_blocks)
+                      << " |  " << std::fixed << std::setprecision(0) << static_cast<double>(stats.total_blocks)
                       << " (" << std::fixed << std::setprecision(0) << stats.error_blocks << ")\n";
 
             // Запись текущей строки в CSV-файл (последним аргументом пишется elapsed_seconds)
