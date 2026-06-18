@@ -75,7 +75,6 @@ inline void rm_soft_decode_recursive_fast(int r, int m, std::span<const T> llr, 
     auto llr1 = llr.subspan(0, half);
     auto llr2 = llr.subspan(half, half);
 
-    // Безопасное RAII управление памятью: offset гарантированно откатится при любом return
     typename DecoderWorkspace<T>::Guard memory_guard(ws); 
 
     // Шаг 1: Декодирование компоненты v2 (соответствует коду RM(r-1, m-1))
@@ -126,7 +125,10 @@ inline void rm_soft_decode_recursive_fast(int r, int m, std::span<const T> llr, 
 template <std::floating_point T>
 inline std::vector<int> rm_soft_decode_fast(int r, int m, std::span<const T> llr, DecoderWorkspace<T>& ws) {
     std::vector<T> bipolar_output(llr.size());
+    
+    typename DecoderWorkspace<T>::Guard top_guard(ws);
     ws.current_offset = 0;
+
     rm_soft_decode_recursive_fast<T>(r, m, llr, bipolar_output, ws);
     
     std::vector<int> decoded_bits(llr.size());
@@ -151,20 +153,16 @@ inline void plotkin_encode_recursive(int r, int m, std::span<const int> info, st
         return; 
     }
 
-    // Вычисляем размерности подкодов
     int k_v1 = get_rm_k(r, m - 1);
     int k_v2 = get_rm_k(r - 1, m - 1);
     assert(info.size() == static_cast<size_t>(k_v1 + k_v2));
 
-    // Нарезаем входную информацию
     auto info_v1 = info.subspan(0, k_v1);
     auto info_v2 = info.subspan(k_v1, k_v2);
 
     const size_t half = n / 2;
     auto output_left  = output.subspan(0, half);
     auto output_right = output.subspan(half, half);
-
-    // Схема Плоткина: (v1, v1 ^ v2)
     
     // 1. Кодируем v1 прямо в левую половину output. Теперь output_left содержит v1.
     plotkin_encode_recursive(r, m - 1, info_v1, output_left);
@@ -185,23 +183,19 @@ inline std::vector<int> rm_encode(int r, int m, const std::vector<int>& info) {
     
     size_t n = 1 << m;
     std::vector<int> codeword(n);
-    
-    // Вызов без передачи ws
     plotkin_encode_recursive(r, m, info, codeword);
-    
     return codeword;
 }
 
 /**
  * @brief Рекурсивное извлечение исходных информационных битов из безошибочного кодового слова.
  * 
- * Процедура производит обратное разбиение Плоткина \f$(u, u \oplus v) \to (u, v)\f$ для 
- * систематического восстановления исходного информационного вектора.
+ * Процедура производит обратное разбиение Плоткина для восстановления информационного вектора.
  * 
  * @param[in] r Текущий порядок кода.
  * @param[in] m Текущий параметр длины блока.
  * @param[in] codeword Текущий сегмент кодового слова (или его промежуточная компонента).
- * @param[out] info Итоговый буфер, куда послойно записываются извлеченные информационные биты.
+ * @param[out] info Итоговый буфер, куда записываются информационные биты.
  */
 inline void rm_extract_info_recursive(int r, int m, std::span<const int> codeword, std::span<int> info) {
     if (r == 0) { info[0] = codeword[0]; return; }

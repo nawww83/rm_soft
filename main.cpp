@@ -10,87 +10,11 @@
 #include <string>
 #include <sstream>
 
+#include "generals.hpp"
 #include "modulation.hpp"
 #include "rm_codes.hpp"
 #include "polar_encoder.hpp"
 #include "polar_decoder.hpp"
-#include "nr_5g_polar_table.hpp"
-
-#include <future>
-#include <thread>
-#include <queue>
-#include <mutex>
-#include <condition_variable>
-#include <functional>
-
-// Простая и эффективная реализация Пула Потоков (Thread Pool)
-class ThreadPool
-{
-private:
-    std::vector<std::jthread> workers;
-    std::queue<std::function<void()>> tasks;
-    std::mutex queue_mutex;
-    std::condition_variable cv;
-    bool stop = false;
-
-public:
-    ThreadPool(size_t threads)
-    {
-        for (size_t i = 0; i < threads; ++i)
-        {
-            workers.emplace_back([this](std::stop_token st)
-                                 {
-                while (!st.stop_requested()) {
-                    std::function<void()> task;
-                    {
-                        std::unique_lock<std::mutex> lock(this->queue_mutex);
-                        this->cv.wait(lock, [this, &st] { 
-                            return this->stop || !this->tasks.empty() || st.stop_requested(); 
-                        });
-                        
-                        if ((this->stop || st.stop_requested()) && this->tasks.empty())
-                            return;
-                            
-                        task = std::move(this->tasks.front());
-                        this->tasks.pop();
-                    }
-                    task(); // Выполняем симуляцию точки
-                } });
-        }
-    }
-
-    // Шаблонная функция добавления задачи (возвращает std::future)
-    template <class F, class... Args>
-    auto enqueue(F &&f, Args &&...args)
-        -> std::future<typename std::invoke_result<F, Args...>::type>
-    {
-        using return_type = typename std::invoke_result<F, Args...>::type;
-
-        auto task = std::make_shared<std::packaged_task<return_type()>>(
-            std::bind(std::forward<F>(f), std::forward<Args>(args)...));
-
-        std::future<return_type> res = task->get_future();
-        {
-            std::lock_guard<std::mutex> lock(queue_mutex);
-            if (stop)
-                throw std::runtime_error("Добавление задачи в остановленный пул");
-            tasks.emplace([task]()
-                          { (*task)(); });
-        }
-        cv.notify_one();
-        return res;
-    }
-
-    ~ThreadPool()
-    {
-        {
-            std::lock_guard<std::mutex> lock(queue_mutex);
-            stop = true;
-        }
-        cv.notify_all();
-        // jthread автоматически сделают join при уничтожении вектора workers
-    }
-};
 
 // Структура для возврата счетчиков ошибок за одну итерацию функции
 struct SimResult
@@ -111,74 +35,6 @@ struct TotalStats
     long long total_blocks = 0;
     long long error_blocks = 0;
 };
-
-enum class CodeType
-{
-    ReedMuller,
-    PolarFastSsc,
-    PolarSc
-};
-
-class UniversalRandomInterleaver
-{
-private:
-    size_t N;
-    std::vector<size_t> p_forward;
-    std::vector<size_t> p_backward;
-
-public:
-    explicit UniversalRandomInterleaver(size_t block_size, unsigned int seed = 42) : N(block_size)
-    {
-        p_forward.resize(N);
-        std::iota(p_forward.begin(), p_forward.end(), 0);
-        std::mt19937 g(seed);
-        std::shuffle(p_forward.begin(), p_forward.end(), g);
-
-        p_backward.resize(N);
-        for (size_t i = 0; i < N; ++i)
-        {
-            p_backward[p_forward[i]] = i;
-        }
-    }
-
-    size_t size() const { return N; }
-
-    // ОПТИМИЗИРОВАНО: Принимает готовый вектор-приемник и перезаписывает его (без аллокаций!)
-    inline void interleave(std::span<const int> src, std::span<int> dst) const
-    {
-        for (size_t i = 0; i < N; ++i)
-        {
-            dst[i] = src[p_forward[i]];
-        }
-    }
-
-    // ОПТИМИЗИРОВАНО: Деперемежение LLR напрямую в существующий буфер
-    template <std::floating_point T>
-    inline void deinterleave(std::span<const T> src, std::span<T> dst) const
-    {
-        for (size_t i = 0; i < N; ++i)
-        {
-            dst[i] = src[p_backward[i]];
-        }
-    }
-};
-
-inline std::vector<uint8_t> get_polar_5g_mask(size_t n, int k) {
-    assert(n <= 1024 && (n & (n - 1)) == 0 && "N должно быть степенью 2");
-    std::vector<int> filtered;
-    filtered.reserve(n);
-    for (uint16_t idx : nr_5g_polar::reliability_table_1024) {
-        if (idx < static_cast<int>(n)) {
-            filtered.push_back(idx);
-        }
-    }
-    std::vector<uint8_t> channel_mask(n, 0);
-    size_t start_info_idx = filtered.size() - k;
-    for (size_t i = start_info_idx; i < filtered.size(); ++i) {
-        channel_mask[filtered[i]] = 1;
-    }
-    return channel_mask;
-}
 
 SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType code_type, int target_k = 0)
 {
@@ -217,7 +73,7 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
     std::uniform_int_distribution<int> bit_dist(0, 1);
     std::normal_distribution<double> noise_dist(0.0, sigma_1d);
 
-    DecoderWorkspace<double> ws(n);
+    DecoderWorkspace<double> ws_double(n);
     UniversalRandomInterleaver interleaver(n, 42);
 
     long long total_bits = 0, error_bits = 0;
@@ -278,7 +134,7 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
         std::vector<int> rx_info;
         if (code_type == CodeType::ReedMuller)
         {
-            std::vector<int> rx_codeword = rm_soft_decode_fast(r, m, std::span<const double>(padded_rx_llr).subspan(0, n), ws);
+            std::vector<int> rx_codeword = rm_soft_decode_fast(r, m, std::span<const double>(padded_rx_llr).subspan(0, n), ws_double);
             rx_info = rm_extract_info(r, m, rx_codeword);
         }
         else if (code_type == CodeType::PolarFastSsc)
@@ -288,7 +144,7 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
             interleaver.deinterleave<double>(src_llr_span, dst_llr_span);
 
             std::span<const double> ready_llr_span(deinterleaved_llr_buf.data(), n);
-            std::vector<int> decoded_u = polar_decode_fast_generic<double>(ready_llr_span, bit_mask, ws);
+            std::vector<int> decoded_u = polar_decode_fast_generic<double>(ready_llr_span, bit_mask, ws_double);
             rx_info = polar_extract_info_generic(decoded_u, k, bit_mask);
         } else if (code_type == CodeType::PolarSc) {
              std::span<const double> src_llr_span(padded_rx_llr.data(), n);
@@ -296,7 +152,7 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
             interleaver.deinterleave<double>(src_llr_span, dst_llr_span);
 
             std::span<const double> ready_llr_span(deinterleaved_llr_buf.data(), n);
-            std::vector<int> decoded_u = polar_decode_sc_clean<double>(ready_llr_span, bit_mask, ws);
+            std::vector<int> decoded_u = polar_decode_sc_clean<double>(ready_llr_span, bit_mask, ws_double);
             rx_info = polar_extract_info_generic(decoded_u, k, bit_mask);
         }
 
