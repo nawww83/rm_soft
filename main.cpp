@@ -53,7 +53,6 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
         k = (target_k == 0) ? get_rm_k(r, m) : target_k;
         // Получаем оригинальную маску 5G (1 = INFO, 0 = FROZEN)
         bit_mask = get_polar_5g_mask(n, k);
-        // bit_mask = polar_mask::generate_custom_qam_mask(n, k, 5);
     }
 
     size_t padded_n = (n % 4 == 0) ? n : n + (4 - (n % 4));
@@ -180,7 +179,7 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
 
 int main()
 {
-    const CodeType code_type = CodeType::ReedMuller;
+    const CodeType code_type = CodeType::PolarFastSsc;
     const int r = 2;
     const int m = 6;
 
