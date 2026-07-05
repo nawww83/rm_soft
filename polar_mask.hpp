@@ -23,17 +23,19 @@ namespace polar_mask
     class PolarDesignGA
     {
     private:
-        //  Функция phi(x) с защитой от переполнения.
+        /**
+         * Аппроксимация Трифонова П.В. Адаптация метода Чунга (Chung) к полярным кодам.
+         */
         static inline double phi(double x)
         {
             if (x <= 0.0)
                 return 1.0;
             if (x > 35.0)
-                return 0.0; // Порог насыщения: при x > 35 значение phi(x) меньше предела точности double
+                return 0.0;
 
             if (x <= 10.0)
             {
-                return std::exp(-0.4527 * std::pow(x, 0.86) + 0.0218);
+                return std::exp(-0.4527 * std::pow(x, 0.86) + 0.0773);
             }
             else
             {
@@ -41,17 +43,17 @@ namespace polar_mask
             }
         }
 
-        // Обратная функция phi^(-1)(y).
         static inline double phi_inv(double y)
         {
-            if (y >= 0.9999999)
+            if (y >= 0.999999)
                 return 0.0;
-            if (y <= 0.0000001)
-                return 35.0; // Если канал стал "идеальным", ограничиваем его рост порогом насыщения
+            if (y <= 0.000001)
+                return 35.0;
 
             double low = 0.0;
-            double high = 35.0; // Ищем в пределах разумного диапазона
-            for (int iter = 0; iter < 64; ++iter)
+            double high = 35.0;
+
+            for (int iter = 0; iter < 24; ++iter)
             {
                 double mid = low + (high - low) / 2.0;
                 if (phi(mid) < y)
@@ -66,52 +68,67 @@ namespace polar_mask
             return low;
         }
 
-        // Модифицированное ядро с защитой от вычислительного взрыва.
-        static void ga_recursive_core_left_triangular(std::span<PolarChannel> channels)
+        // Расчет по слоям графа
+        static void calculate_ga_stages(std::vector<PolarChannel> &channels, double m_0)
         {
-            const size_t n = channels.size();
-            if (n <= 1)
-                return;
-            const size_t half = n / 2;
+            const size_t N = channels.size();
 
-            for (size_t i = 0; i < half; ++i)
+            // На нулевом этапе (входе) все каналы инициализируются начальным m_0
+            for (size_t i = 0; i < N; ++i)
             {
-                double m1 = channels[i].m_value;
-                double m2 = channels[half + i].m_value;
-
-                // f-узел: верхняя половина ухудшается за счет XOR
-                double m_f;
-                // Защита: если один из каналов уже "идеальный", операция XOR определяется вторым каналом
-                if (m1 > 35.0)
-                    m_f = m2;
-                else if (m2 > 35.0)
-                    m_f = m1;
-                else
-                {
-                    m_f = phi_inv(1.0 - (1.0 - phi(m1)) * (1.0 - phi(m2)));
-                }
-
-                if (std::isnan(m_f) || std::isinf(m_f))
-                    m_f = 0.0;
-
-                // g-узел: нижняя половина улучшается
-                double m_g = m1 + m2;
-
-                // Ограничиваем рост LLR, чтобы избежать вычислительного хаоса на больших N
-                if (m_g > 300.0)
-                    m_g = 300.0;
-
-                channels[i].m_value = m_f;
-                channels[half + i].m_value = m_g;
+                channels[i].m_value = m_0;
             }
 
-            ga_recursive_core_left_triangular(channels.subspan(0, half));
-            ga_recursive_core_left_triangular(channels.subspan(half, half));
+            // Внешний цикл: шагаем по этапам (каскадам) графа Арикана.
+            // Всего log2(N) этапов. step принимает значения: 1, 2, 4, 8 ... до N/2
+            for (size_t step = 1; step < N; step <<= 1)
+            {
+                // Разделяем массив на независимые блоки размером 2 * step
+                for (size_t block = 0; block < N; block += 2 * step)
+                {
+                    // Итерируемся внутри одного блока
+                    for (size_t i = 0; i < step; ++i)
+                    {
+                        // Индексы гарантированно лежат в пределах [0, N-1]
+                        size_t idx_left = block + i;
+                        size_t idx_right = block + i + step;
+
+                        double m_prev = channels[idx_left].m_value; // В начале шага они равны
+
+                        // f-узел (левая ветвь) -> ухудшение
+                        double m_f;
+                        if (m_prev > 35.0)
+                        {
+                            m_f = m_prev;
+                        }
+                        else
+                        {
+                            double phi_val = phi(m_prev);
+                            m_f = phi_inv(1.0 - (1.0 - phi_val) * (1.0 - phi_val));
+                        }
+
+                        // g-узел (правая ветвь) -> удвоение
+                        double m_g = 2.0 * m_prev;
+                        if (m_g > 300.0)
+                            m_g = 300.0;
+
+                        // Записываем результаты на свои места в текущем слое
+                        channels[idx_left].m_value = m_f;
+                        channels[idx_right].m_value = m_g;
+                    }
+                }
+            }
         }
 
     public:
         static std::vector<PolarChannel> generate(size_t N, double snr_db)
         {
+            // Проверка на степень двойки для защиты от бесконечных циклов
+            if (N == 0 || (N & (N - 1)) != 0)
+            {
+                throw std::invalid_argument("Размер N должен быть степенью двойки.");
+            }
+
             double snr_linear = std::pow(10.0, snr_db / 10.0);
             double m_0 = 4.0 * snr_linear;
 
@@ -119,14 +136,14 @@ namespace polar_mask
             for (size_t i = 0; i < N; ++i)
             {
                 channels[i].index = i;
-                channels[i].m_value = m_0;
+                channels[i].m_value = 0.0;
                 channels[i].error_prob = 0.0;
             }
 
             // Запуск расчета
-            ga_recursive_core_left_triangular(channels);
+            calculate_ga_stages(channels, m_0);
 
-            // Расчет вероятности ошибки (согласованный с m_0 = 4 * SNR)
+            // Расчет финальной вероятности ошибки
             for (size_t i = 0; i < N; ++i)
             {
                 if (channels[i].m_value <= 0.0)
@@ -135,12 +152,13 @@ namespace polar_mask
                 }
                 else
                 {
-                    channels[i].error_prob = 0.5 * std::erfc(std::sqrt(channels[i].m_value / 8.0));
+                    channels[i].error_prob = 0.5 * std::erfc(std::sqrt(channels[i].m_value) / 2.0);
                 }
             }
 
             return channels;
         }
+
         /**
          * Верификатор полярной последовательности.
          * Проверяет GA-расчет на соответствие фундаментальному свойству частичного порядка (Partial Ordering).
@@ -152,15 +170,20 @@ namespace polar_mask
             const size_t N = channels.size();
             bool is_valid = true;
 
+            // Допуск для сравнения double (защита от погрешностей округления в зоне насыщения)
+            const double EPSILON = 1e-6;
+
+            // Оптимизация: j всегда строго больше i, так как подмножество по индексам
+            // может приводить к большему числу только при добавлении единичных битов (i < j)
             for (size_t i = 0; i < N; ++i)
             {
-                for (size_t j = 0; j < N; ++j)
+                for (size_t j = i + 1; j < N; ++j)
                 {
-                    // Проверяем отношение побитового включения: i является подмножеством j (i <= j по полупорядку)
-                    // Пример: 1 (0001) является подмножеством 3 (0011). Значит канал 1 ОБЯЗАН быть хуже или равен каналу 3.
+                    // Проверяем отношение побитового включения: i является подмножеством j
                     if ((i & j) == i)
                     {
-                        if (channels[i].m_value > channels[j].m_value)
+                        // Использован допуск EPSILON, чтобы избежать ложных срабатываний
+                        if (channels[i].m_value > channels[j].m_value + EPSILON)
                         {
                             std::cout << "[ОШИБКА ВЕРИФИКАЦИИ] Нарушен частичный порядок! "
                                       << "Канал " << i << " (m=" << channels[i].m_value << ") "
@@ -205,10 +228,8 @@ namespace polar_mask
             // 3. Сортировка каналов по надежности (от худших к лучшим)
             // В теории полярных кодов принято выстраивать последовательность от самых слабых к сильным
             std::vector<PolarChannel> sorted_channels = channels;
-            std::sort(sorted_channels.begin(), sorted_channels.end(), [](const PolarChannel &a, const PolarChannel &b)
-                      {
-                          return a.m_value < b.m_value; // Сортировка по возрастанию надежности
-                      });
+            std::stable_sort(sorted_channels.begin(), sorted_channels.end(), [](const PolarChannel &a, const PolarChannel &b)
+                             { return a.m_value < b.m_value; });
 
             // 4. Форматированный вывод таблицы
             // Определяем ширину битового представления в зависимости от N (для N=64 нужно 6 бит)
@@ -264,7 +285,7 @@ namespace polar_mask
             std::string line_76(76, '-');
             std::cout << line_76 << "\n";
 
-            // 1. Сначала вычислим значения -log10(Pe) для всех каналов и найдем максимум
+            // 1. Вычисляем значения -log10(Pe) для всех каналов и находим максимум
             std::vector<double> log_pe_values(N);
             double max_log_pe = 0.0;
 
@@ -272,12 +293,10 @@ namespace polar_mask
             {
                 double pe = channels[i].error_prob;
 
-                // Защита от Pe = 0.0 (для идеальных каналов вроде 63-го при насыщении)
                 if (pe < 1e-15)
                 {
                     pe = 1e-15;
                 }
-                // Защита от худших каналов (если Pe близко к 0.5, log10 будет около -0.3)
                 if (pe > 0.499)
                 {
                     pe = 0.499;
@@ -291,15 +310,17 @@ namespace polar_mask
             }
 
             // 2. Отрисовка гистограммы
-            const size_t max_bar_width = 40; // Максимальная длина полосы
-            size_t num_bits = std::log2(N);
+            const size_t max_bar_width = 40;
+            size_t num_bits = static_cast<size_t>(std::log2(N));
 
             for (size_t i = 0; i < N; ++i)
             {
-                // Перевод индекса в бинарную строку
-                std::string bin_str = std::bitset<64>(channels[i].index).to_string().substr(64 - num_bits);
+                // Извлекаем оригинальный физический индекс канала из структуры
+                size_t actual_channel_idx = channels[i].index;
 
-                // Пропорциональное вычисление длины полосы графика
+                // Перевод оригинального индекса в бинарную строку
+                std::string bin_str = std::bitset<64>(actual_channel_idx).to_string().substr(64 - num_bits);
+
                 size_t bar_length = 0;
                 if (max_log_pe > 0.0)
                 {
@@ -308,10 +329,11 @@ namespace polar_mask
                 if (bar_length == 0)
                     bar_length = 1;
 
-                char symbol = is_info_mask[i] ? '#' : '.';
+                // Берем статус "заморозки" строго по оригинальному индексу канала
+                char symbol = is_info_mask[actual_channel_idx] ? '#' : '.';
                 std::string bar(bar_length, symbol);
 
-                std::cout << "Ch " << std::setw(3) << std::left << channels[i].index
+                std::cout << "Ch " << std::setw(3) << std::left << actual_channel_idx
                           << " (" << bin_str << ") "
                           << "Pe: [" << std::scientific << std::setprecision(2) << channels[i].error_prob << "] "
                           << "| " << std::setw(max_bar_width) << std::left << bar
@@ -322,7 +344,6 @@ namespace polar_mask
     };
 
 } // namespace polar_mask
-
 
 /*
 int main()
