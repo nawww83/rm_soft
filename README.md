@@ -2,6 +2,8 @@
 
 Декодеры Reed-Muller и Polar Codes на основе LLR в C++.
 
+https://vk.ru/codesandsignals
+
 ## Описание проекта
 
 `rm_soft` — это исследовательский проект на C++, предназначенный для реализации и оценки декодирования кодов Рида–Маллера (Reed-Muller, RM) и полярных кодов (Polar Codes) на основе log-likelihood ratios (LLR).
