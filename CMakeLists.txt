@@ -16,7 +16,7 @@ endif()
 find_package(Threads REQUIRED)
 
 # Добавляем исполняемый файл проекта
-add_executable(rm_sim main.cpp rm_codes.hpp)
+add_executable(rm_soft main.cpp)
 
 # Линкуем потоки
-target_link_libraries(rm_sim PRIVATE Threads::Threads)
+target_link_libraries(rm_soft PRIVATE Threads::Threads)

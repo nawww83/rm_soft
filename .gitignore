@@ -20,10 +20,15 @@ obj/
 .DS_Store
 Thumbs.db
 
+# Python
+__pycache__/
+*.pyc
+
 # Данные
 *.csv
 *.svg
 *.txt
 
-# Исключение: конфигурация сборки
+# Исключения: конфигурация сборки и зависимости
 !CMakeLists.txt
+!requirements.txt

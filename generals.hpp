@@ -8,6 +8,9 @@
 #include <concepts>
 #include <complex>
 #include <cassert>
+#include <iostream>
+#include <random>
+#include <stdexcept>
 #include <future>
 #include <thread>
 #include <queue>
@@ -76,7 +79,10 @@ inline std::vector<uint8_t> get_polar_5g_mask(size_t n, int k) {
         }
     }
     std::vector<uint8_t> channel_mask(n, 0);
-    size_t start_info_idx = filtered.size() - k;
+    if (k < 0 || static_cast<size_t>(k) > filtered.size()) {
+        throw std::invalid_argument("get_polar_5g_mask: K должно быть в диапазоне [0, N]");
+    }
+    size_t start_info_idx = filtered.size() - static_cast<size_t>(k);
     for (size_t i = start_info_idx; i < filtered.size(); ++i) {
         channel_mask[filtered[i]] = 1;
     }
@@ -111,7 +117,7 @@ struct DecoderWorkspace {
         if (current_offset + size > memory_pool.size()) {
             std::cerr << "CRITICAL: Workspace pool overflow! Offset: " << current_offset 
                       << ", Requested: " << size << ", Capacity: " << memory_pool.size() << std::endl;
-            assert(false);
+            throw std::runtime_error("DecoderWorkspace: переполнение пула памяти");
         }
         std::span<T> sp(memory_pool.data() + current_offset, size);
         current_offset += size;

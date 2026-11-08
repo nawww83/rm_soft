@@ -4,7 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <numeric>   // Для std::reduce
-#include <bit>       // Для std::popcount (C++20)
 
 /**
  * @file node_types.hpp

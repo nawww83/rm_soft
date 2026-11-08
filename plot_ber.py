@@ -1,3 +1,5 @@
+import sys
+
 import matplotlib
 matplotlib.use('Agg')  # Отключает GUI для работы в WSL
 
@@ -30,19 +32,22 @@ def ber_theoretical_qam16(ebn0_db):
 # ==========================================
 # 2. Загрузка данных симулятора
 # ==========================================
-csv_filename_1 = "live_results_rm_2_6.csv"
-try:
-    data_rm = pd.read_csv(csv_filename_1)
-except FileNotFoundError:
-    print(f"Ошибка: Файл '{csv_filename_1}' не найден. Запустите симулятор.")
-    exit()
+def load_results(label, filenames):
+    """Читает первый существующий CSV из списка кандидатов."""
+    for filename in filenames:
+        try:
+            return pd.read_csv(filename)
+        except FileNotFoundError:
+            continue
+    print(f"Ошибка: не найден CSV для «{label}». Ожидались файлы: {', '.join(filenames)}")
+    print("Запустите симулятор: ./rm_soft rm и ./rm_soft ssc")
+    sys.exit(1)
 
-csv_filename_2 = "live_results_polar_2_6.csv"
-try:
-    data_polar = pd.read_csv(csv_filename_2)
-except FileNotFoundError:
-    print(f"Ошибка: Файл '{csv_filename_2}' не найден. Запустите симулятор.")
-    exit()
+data_rm = load_results("RM", ["live_results_rm_2_6.csv"])
+data_polar = load_results(
+    "Polar",
+    ["live_results_polar_fast_ssc_2_6.csv", "live_results_polar_sc_2_6.csv", "live_results_polar_2_6.csv"],
+)
 
 ebn0_sim_rm = data_rm["Eb/N0 (dB)"].values
 ber_sim_rm = data_rm["BER"].values

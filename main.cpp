@@ -8,7 +8,15 @@
 #include <span>
 #include <fstream>
 #include <string>
-#include <sstream>
+#include <string_view>
+#include <thread>
+#include <cassert>
+
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "generals.hpp"
 #include "modulation.hpp"
@@ -16,10 +24,58 @@
 #include "polar_encoder.hpp"
 #include "polar_decoder.hpp"
 
+namespace
+{
+// Проверяем, выводится ли текст в терминал: escape-последовательности очистки
+// экрана не должны попадать в файл при перенаправлении вывода.
+bool stdout_is_tty()
+{
+#if defined(_WIN32)
+    return _isatty(_fileno(stdout)) != 0;
+#else
+    return isatty(fileno(stdout)) != 0;
+#endif
+}
+
+std::string_view code_type_name(CodeType type)
+{
+    switch (type)
+    {
+    case CodeType::ReedMuller:
+        return "rm";
+    case CodeType::PolarFastSsc:
+        return "polar_fast_ssc";
+    case CodeType::PolarSc:
+        return "polar_sc";
+    }
+    return "unknown";
+}
+
+bool parse_code_type(std::string_view name, CodeType &out)
+{
+    if (name == "rm")
+    {
+        out = CodeType::ReedMuller;
+    }
+    else if (name == "ssc" || name == "polar_fast_ssc")
+    {
+        out = CodeType::PolarFastSsc;
+    }
+    else if (name == "sc" || name == "polar_sc")
+    {
+        out = CodeType::PolarSc;
+    }
+    else
+    {
+        return false;
+    }
+    return true;
+}
+} // namespace
+
 // Структура для возврата счетчиков ошибок за одну итерацию функции
 struct SimResult
 {
-    double eb_n0_db;
     long long total_bits;
     long long error_bits;
     long long total_blocks;
@@ -55,8 +111,8 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
         bit_mask = get_polar_5g_mask(n, k);
     }
 
-    size_t padded_n = (n % 4 == 0) ? n : n + (4 - (n % 4));
-    double code_rate = static_cast<double>(k) / n;
+    assert(n % 4 == 0 && "Для 16-QAM длина блока должна быть кратна 4");
+    double code_rate = static_cast<double>(k) / static_cast<double>(n);
     double bits_per_symbol = 4.0; // 16-QAM
     double eb_n0_linear = std::pow(10.0, eb_n0_db / 10.0);
 
@@ -82,9 +138,8 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
     const long long max_packets = (eb_n0_db >= 10.0) ? 300'000 : 50'000;
 
     std::vector<int> tx_info(k);
-    std::vector<int> tx_codeword;
     std::vector<int> qam_tx_bits;
-    qam_tx_bits.reserve(padded_n);
+    qam_tx_bits.reserve(n);
     std::vector<int> interleaved_bits_buf(n);     // Буфер для интерливера
     std::vector<double> deinterleaved_llr_buf(n); // Буфер для деинтерливера LLR
 
@@ -96,20 +151,20 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
         // --- ВЕТВЛЕНИЕ КОДИРОВАНИЯ И ПЕРЕМЕЖЕНИЯ ---
         if (code_type == CodeType::ReedMuller)
         {
-            std::vector<int> tx_codeword = rm_encode(r, m, tx_info);
-            qam_tx_bits.assign(padded_n, 0);
-            std::copy(tx_codeword.begin(), tx_codeword.end(), qam_tx_bits.begin());
+            const std::vector<int> codeword = rm_encode(r, m, tx_info);
+            qam_tx_bits.assign(n, 0);
+            std::copy(codeword.begin(), codeword.end(), qam_tx_bits.begin());
         }
         else if (code_type == CodeType::PolarFastSsc || code_type == CodeType::PolarSc)
         {
-            std::vector<int> tx_codeword = pure_polar_encode(n, tx_info, bit_mask);
-            interleaver.interleave(std::span<const int>(tx_codeword), std::span<int>(interleaved_bits_buf));
-            qam_tx_bits.assign(padded_n, 0);
+            const std::vector<int> codeword = pure_polar_encode(n, tx_info, bit_mask);
+            interleaver.interleave(std::span<const int>(codeword), std::span<int>(interleaved_bits_buf));
+            qam_tx_bits.assign(n, 0);
             std::copy(interleaved_bits_buf.begin(), interleaved_bits_buf.end(), qam_tx_bits.begin());
         }
 
         // --- МОДУЛЯЦИЯ (16-QAM) ---
-        size_t num_symbols = padded_n / 4;
+        size_t num_symbols = n / 4;
         std::vector<std::complex<double>> tx_symbols(num_symbols);
         for (size_t i = 0; i < num_symbols; ++i)
         {
@@ -119,39 +174,33 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
         }
 
         // --- КАНАЛ С ШУМОМ ---
-        std::vector<double> padded_rx_llr(padded_n);
+        std::vector<double> rx_llr(n);
         for (size_t i = 0; i < num_symbols; ++i)
         {
             double rx_i = tx_symbols[i].real() + noise_dist(gen);
             double rx_v = tx_symbols[i].imag() + noise_dist(gen);
 
-            calculate_pam4_llr(rx_i, sigma2_1d, padded_rx_llr[i * 4 + 0], padded_rx_llr[i * 4 + 1]);
-            calculate_pam4_llr(rx_v, sigma2_1d, padded_rx_llr[i * 4 + 2], padded_rx_llr[i * 4 + 3]);
+            calculate_pam4_llr(rx_i, sigma2_1d, rx_llr[i * 4 + 0], rx_llr[i * 4 + 1]);
+            calculate_pam4_llr(rx_v, sigma2_1d, rx_llr[i * 4 + 2], rx_llr[i * 4 + 3]);
         }
 
         // --- ВЕТВЛЕНИЕ ДЕПЕРЕМЕЖЕНИЯ И ДЕКОДИРОВАНИЯ ---
         std::vector<int> rx_info;
         if (code_type == CodeType::ReedMuller)
         {
-            std::vector<int> rx_codeword = rm_soft_decode_fast(r, m, std::span<const double>(padded_rx_llr).subspan(0, n), ws_double);
+            std::vector<int> rx_codeword = rm_soft_decode_fast(r, m, std::span<const double>(rx_llr), ws_double);
             rx_info = rm_extract_info(r, m, rx_codeword);
         }
-        else if (code_type == CodeType::PolarFastSsc)
+        else
         {
-            std::span<const double> src_llr_span(padded_rx_llr.data(), n);
+            std::span<const double> src_llr_span(rx_llr.data(), n);
             std::span<double> dst_llr_span(deinterleaved_llr_buf.data(), n);
             interleaver.deinterleave<double>(src_llr_span, dst_llr_span);
 
             std::span<const double> ready_llr_span(deinterleaved_llr_buf.data(), n);
-            std::vector<int> decoded_u = polar_decode_fast_generic<double>(ready_llr_span, bit_mask, ws_double);
-            rx_info = polar_extract_info_generic(decoded_u, k, bit_mask);
-        } else if (code_type == CodeType::PolarSc) {
-             std::span<const double> src_llr_span(padded_rx_llr.data(), n);
-            std::span<double> dst_llr_span(deinterleaved_llr_buf.data(), n);
-            interleaver.deinterleave<double>(src_llr_span, dst_llr_span);
-
-            std::span<const double> ready_llr_span(deinterleaved_llr_buf.data(), n);
-            std::vector<int> decoded_u = polar_decode_sc_clean<double>(ready_llr_span, bit_mask, ws_double);
+            std::vector<int> decoded_u = (code_type == CodeType::PolarFastSsc)
+                                             ? polar_decode_fast_generic<double>(ready_llr_span, bit_mask, ws_double)
+                                             : polar_decode_sc_clean<double>(ready_llr_span, bit_mask, ws_double);
             rx_info = polar_extract_info_generic(decoded_u, k, bit_mask);
         }
 
@@ -174,12 +223,21 @@ SimResult run_qam16_simulation_point(int r, int m, double eb_n0_db, CodeType cod
         total_blocks++;
     }
 
-    return {eb_n0_db, total_bits, error_bits, total_blocks, error_blocks};
+    return {total_bits, error_bits, total_blocks, error_blocks};
 }
 
-int main()
+int main(int argc, char **argv)
 {
-    const CodeType code_type = CodeType::PolarFastSsc;
+    CodeType code_type = CodeType::PolarFastSsc;
+    if (argc > 1 && !parse_code_type(argv[1], code_type))
+    {
+        std::cerr << "Неизвестный тип кода: '" << argv[1] << "'\n"
+                  << "Использование: " << argv[0] << " [rm|ssc|sc]\n"
+                  << "  rm  — коды Рида–Маллера\n"
+                  << "  ssc — полярный код, Fast-SSC (по умолчанию)\n"
+                  << "  sc  — полярный код, классический SC\n";
+        return 1;
+    }
     const int r = 2;
     const int m = 6;
 
@@ -250,12 +308,8 @@ int main()
         // =========================================================================
     }
 
-    std::stringstream ss;
-    ss << "live_results_"
-       << (code_type == CodeType::ReedMuller ? "rm" : (code_type == CodeType::PolarFastSsc ? "polar_fast_ssc" : "polar_sc"))
-       << "_" << r << "_" << m << ".csv";
-
-    const std::string csv_filename = ss.str();
+    const std::string csv_filename = "live_results_" + std::string(code_type_name(code_type)) + "_" +
+                                     std::to_string(r) + "_" + std::to_string(m) + ".csv";
 
     std::vector<double> ebn0_grid;
     for (double db = 2.0; db <= 12.0; db += 1.0)
@@ -283,7 +337,8 @@ int main()
     // Создаем пул потоков строго под архитектуру вашего процессора!
     ThreadPool pool(num_threads);
 
-    std::cout << "Запуск непрерывной симуляции RM(" << r << ", " << m << ") + 16-QAM..." << std::endl;
+    std::cout << "Запуск непрерывной симуляции " << code_type_name(code_type) << "(" << r << ", " << m
+              << ") + 16-QAM..." << std::endl;
     auto global_start_time = std::chrono::high_resolution_clock::now();
     long long current_iteration = 0;
 
@@ -320,8 +375,11 @@ int main()
             csv_file << std::scientific << std::setprecision(6);
         }
 
-        // 4. Очистка экрана консоли
-        std::cout << "\033[2J\033[H";
+        // 4. Очистка экрана консоли (только при выводе в терминал)
+        if (stdout_is_tty())
+        {
+            std::cout << "\033[2J\033[H";
+        }
 
         std::cout << "=================================================================\n";
         std::cout << "  УТОЧНЕНИЕ ХАРАКТЕРИСТИК ПОМЕХОУСТОЙЧИВОСТИ\n";
@@ -335,9 +393,9 @@ int main()
         // 5. Обработка, вывод на экран и запись в CSV
         for (const auto &stats : accumulated_stats)
         {
-            double calculated_ber = (stats.total_bits > 0) ? static_cast<double>(stats.error_bits) / stats.total_bits : 0.0;
+            double calculated_ber = (stats.total_bits > 0) ? static_cast<double>(stats.error_bits) / static_cast<double>(stats.total_bits) : 0.0;
 
-            double calculated_bler = (stats.total_blocks > 0) ? static_cast<double>(stats.error_blocks) / stats.total_blocks : 0.0;
+            double calculated_bler = (stats.total_blocks > 0) ? static_cast<double>(stats.error_blocks) / static_cast<double>(stats.total_blocks) : 0.0;
 
             // Вывод в консоль
             std::cout << "    " << std::fixed << std::setprecision(1) << std::setw(4) << stats.eb_n0_db
