@@ -35,17 +35,15 @@ https://vk.ru/codesandsignals
 
 ```text
 .
+├── CMakeLists.txt
 ├── LICENSE
 ├── README.md
-├── crc.hpp
 ├── generals.hpp
 ├── main.cpp
 ├── modulation.hpp
 ├── node_types.hpp
 ├── polar_decoder.hpp
 ├── polar_encoder.hpp
-├── polar_mask.hpp
-├── polar_scl_codec.hpp
 ├── rm_codes.hpp
 ├── nr_5g_polar_table.hpp
 ├── get_polar_mask_5g.py
@@ -59,11 +57,9 @@ https://vk.ru/codesandsignals
 ## Основные компоненты
 
 - `rm_codes.hpp` — реализация кодов Рида–Маллера;
-- `polar_mask.hpp` — маски и структуры для кодов Поляра;
-- `polar_decoder.hpp` и `polar_scl_codec.hpp` — декодеры;
+- `polar_decoder.hpp` — декодер;
 - `polar_encoder.hpp` — кодирование;
 - `modulation.hpp` — вспомогательные функции модуляции;
-- `crc.hpp` — поддержка CRC;
 - `main.cpp` — точка входа для экспериментов и симуляций;
 - `plot_ber.py` и `plot_bler.py` — построение графиков эффективности;
 - `Алгебра_LLR.pdf` — дополнительный теоретический материал по LLR.

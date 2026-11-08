@@ -24,3 +24,6 @@ Thumbs.db
 *.csv
 *.svg
 *.txt
+
+# Исключение: конфигурация сборки
+!CMakeLists.txt
